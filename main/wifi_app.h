@@ -32,6 +32,9 @@ typedef void (*wifi_connected_event_callback_t)(void);
 #define MAX_CONNECTION_RETRIES		5					// Retry number on disconnect
 #define DEFAULT_SCAN_LIST_SIZE 		16
 
+#define WIFI_STA_SSID				"tp-link"
+#define WIFI_STA_PASSWORD			"123456"
+
 // netif object for the Station and Access Point
 extern esp_netif_t* esp_netif_sta;
 extern esp_netif_t* esp_netif_ap;

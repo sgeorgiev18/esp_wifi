@@ -17,6 +17,18 @@
 #include "tasks_common.h"
 #include "wifi_app.h"
 
+#include "sdkconfig.h"
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <errno.h>
+#include <netdb.h>            // struct addrinfo
+#include <arpa/inet.h>
+#include "esp_log.h"
+
+#define PORT 9911
+#define HOST_IP_ADDR "10.11.10.18"
+
 // Tag used for ESP serial console messages
 static const char TAG [] = "wifi_app";
 
@@ -26,6 +38,12 @@ static QueueHandle_t wifi_app_queue_handle;
 // netif objects for the station and access point
 esp_netif_t* esp_netif_sta = NULL;
 esp_netif_t* esp_netif_ap  = NULL;
+
+int addr_family = 0;
+int ip_protocol = 0;
+struct sockaddr_in dest_addr;
+char rx_buffer[128];
+char host_ip[] = HOST_IP_ADDR;
 
 /**
  * WiFi application event handler
@@ -131,23 +149,35 @@ static void wifi_app_soft_ap_config(void)
 				.max_connection = WIFI_AP_MAX_CONNECTIONS,
 				.beacon_interval = WIFI_AP_BEACON_INTERVAL,
 			},
+            .sta = {
+                .ssid = WIFI_STA_SSID,
+                .password = WIFI_STA_PASSWORD,
+                .scan_method = WIFI_FAST_SCAN,
+                .bssid_set = 0,                
+            }
 		};
 
     // Configure DHCP for the AP
-	esp_netif_ip_info_t ap_ip_info;
-	memset(&ap_ip_info, 0x00, sizeof(ap_ip_info));
+	//esp_netif_ip_info_t ap_ip_info;
+	//memset(&ap_ip_info, 0x00, sizeof(ap_ip_info));
 
-    esp_netif_dhcps_stop(esp_netif_ap);					///> must call this first
-	inet_pton(AF_INET, WIFI_AP_IP, &ap_ip_info.ip);		///> Assign access point's static IP, GW, and netmask
-    inet_pton(AF_INET, WIFI_AP_GATEWAY, &ap_ip_info.gw);
-	inet_pton(AF_INET, WIFI_AP_NETMASK, &ap_ip_info.netmask);
-	ESP_ERROR_CHECK(esp_netif_set_ip_info(esp_netif_ap, &ap_ip_info));			///> Statically configure the network interface
-    ESP_ERROR_CHECK(esp_netif_dhcps_start(esp_netif_ap));						///> Start the AP DHCP server (for connecting stations e.g. your mobile device)
+    //esp_netif_dhcps_stop(esp_netif_ap);					///> must call this first
+	//inet_pton(AF_INET, WIFI_AP_IP, &ap_ip_info.ip);		///> Assign access point's static IP, GW, and netmask
+    //inet_pton(AF_INET, WIFI_AP_GATEWAY, &ap_ip_info.gw);
+	//inet_pton(AF_INET, WIFI_AP_NETMASK, &ap_ip_info.netmask);
+    inet_pton(AF_INET, host_ip, &dest_addr.sin_addr);
+	//ESP_ERROR_CHECK(esp_netif_set_ip_info(esp_netif_ap, &ap_ip_info));			///> Statically configure the network interface
+    //ESP_ERROR_CHECK(esp_netif_dhcps_start(esp_netif_ap));						///> Start the AP DHCP server (for connecting stations e.g. your mobile device)
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));						///> Setting the mode as Access Point / Station Mode
-	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));			///> Set our configuration
-	ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_AP_BANDWIDTH));		///> Our default bandwidth 20 MHz
-	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_STA_POWER_SAVE));						///> Power save set to "NONE"
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));						///> Setting the mode as Access Point / Station Mode
+	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &ap_config));			///> Set our configuration
+	//ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_AP_BANDWIDTH));		///> Our default bandwidth 20 MHz
+	//ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_STA_POWER_SAVE));						///> Power save set to "NONE"
+
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(PORT);
+    addr_family = AF_INET;
+    ip_protocol = IPPROTO_IP;
 
 }
 
@@ -174,9 +204,9 @@ static void wifi_app_task(void *pvParameters)
 	ESP_ERROR_CHECK(esp_wifi_start());
 
     //scan for wifi APs
-    ESP_ERROR_CHECK(esp_wifi_scan_start(NULL, true));
+    //ESP_ERROR_CHECK(esp_wifi_scan_start(NULL, true));
 
-    uint16_t number = DEFAULT_SCAN_LIST_SIZE;
+    /* uint16_t number = DEFAULT_SCAN_LIST_SIZE;
     wifi_ap_record_t ap_records[DEFAULT_SCAN_LIST_SIZE];
     memset(&ap_records, 0 , sizeof(wifi_ap_record_t));
     ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_records));
@@ -185,7 +215,48 @@ static void wifi_app_task(void *pvParameters)
     for (int i = 0; i < number; i++)
     {        
         ESP_LOGI(TAG, "%s", ap_records[i].ssid);
+    } */
+
+   // connect to AP
+   ESP_LOGI(TAG, "CONNECTING TO INTERNET...");
+   ESP_ERROR_CHECK(esp_wifi_connect());
+
+   ESP_LOGI(TAG, "CONNECTED SUCCESSFULLY TO INTERNET!");
+
+    int sock =  socket(addr_family, SOCK_STREAM, ip_protocol);
+
+    while(1)
+    {
+        bool try_connect = 1;
+        if (try_connect) {
+            if (sock < 0) {
+                ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+                break;
+            }
+            ESP_LOGI(TAG, "Socket created, connecting to %s:%d", host_ip, PORT);
+
+            int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (err != 0) {
+                ESP_LOGE(TAG, "Socket unable to connect: errno %d", errno);
+                break;
+            }
+            ESP_LOGI(TAG, "Successfully connected");
+        }
+
+        int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        // Error occurred during receiving
+        if (len < 0) {
+            ESP_LOGE(TAG, "recv failed: errno %d", errno);
+            break;
+        }
+        // Data received
+        else {
+            rx_buffer[len] = 0; // Null-terminate whatever we received and treat like a string
+            ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
+            ESP_LOGI(TAG, "%s", rx_buffer);
+        }        
     }
+    
 
     // Send first event message
 	wifi_app_send_message(WIFI_APP_MSG_LOAD_SAVED_CREDENTIALS);
